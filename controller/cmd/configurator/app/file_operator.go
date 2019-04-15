@@ -16,9 +16,14 @@ package app
 
 import (
 	"io/ioutil"
+	"net/url"
 	"os"
 	"path"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -32,6 +37,21 @@ type FileOperator struct{}
 
 func (fo *FileOperator) ReadConfig(configFile string) ([]byte, error) {
 	configRoot := os.Getenv("KUBEBENCH_CONFIG_ROOT")
+
+	u, err := url.Parse(configFile)
+	if err != nil {
+		log.Errorf("Cannot parse invalid path %s. Error: %s", configFile, err)
+		return nil, err
+	}
+
+	if u.Scheme == "s3" {
+		if err := fo.downloadS3Config(u.Host, u.Path, configRoot); err != nil {
+			log.Errorf("Failed to download s3 config: %s. Error: %s", configFile, err)
+			return nil, err
+		}
+		configFile = path.Base(configFile)
+	}
+
 	data, err := ioutil.ReadFile(path.Join(configRoot, configFile))
 	if err != nil {
 		log.Errorf("Could not read file: %s. Error: %s", configFile, err)
@@ -81,5 +101,36 @@ func (fo *FileOperator) writeFileNewDir(data []byte, file string) error {
 		log.Errorf("Failed to write output file: %s. Error: %s", file, err)
 		return err
 	}
+	return nil
+}
+
+func (fo *FileOperator) downloadS3Config(s3Bucket, s3Item, basePath string) error {
+	targetFilePath := path.Join(basePath, path.Base(s3Item))
+
+	file, err := os.Create(targetFilePath)
+	if err != nil {
+		log.Errorf("Unable to open file %q, %v", targetFilePath, err)
+		return err
+	}
+
+	defer file.Close()
+
+	// Initialize a session in us-west-2 that the SDK will use to load
+	// credentials from the shared credentials file ~/.aws/credentials.
+	sess, _ := session.NewSession(&aws.Config{})
+
+	downloader := s3manager.NewDownloader(sess)
+
+	numBytes, err := downloader.Download(file,
+		&s3.GetObjectInput{
+			Bucket: aws.String(s3Bucket),
+			Key:    aws.String(s3Item),
+		})
+	if err != nil {
+		log.Errorf("Unable to download item %q, %v", s3Item, err)
+		return err
+	}
+
+	log.Infof("Downloaded %s %d bytes", file.Name(), numBytes)
 	return nil
 }
